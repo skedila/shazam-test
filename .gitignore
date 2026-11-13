@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Raw API responses (can be large; regenerate by running the script)
+data/raw/*
+!data/raw/.gitkeep
+
+# Python
+*.pyc
+.venv/
