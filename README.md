@@ -25,6 +25,7 @@ cp .env.example .env               # Windows: copy .env.example .env
 ```bash
 python test_api.py                 # default search term
 python test_api.py "bad bunny"     # your own search term
+python test_api.py --mb-only       # only test MusicBrainz, uses no RapidAPI quota
 ```
 
 The script makes **4 requests** per run:
@@ -35,6 +36,12 @@ The script makes **4 requests** per run:
 | 2 | `/charts/track` | Top 20 songs on the US chart |
 | 3 | `/search` | Songs matching your search term |
 | 4 | `/songs/v2/get-details` | Full details for the #1 chart song |
+
+After the Shazam calls, it looks up artists on **MusicBrainz** (free, no key)
+and prints each one's country, type, and top genre tags. It uses artists from
+the chart if one came back, otherwise a few well-known fallback artists.
+Set `MUSICBRAINZ_CONTACT` in `.env` to a real email; MusicBrainz asks every
+app to identify itself.
 
 It also prints how many requests you have left on your plan, when the API
 reports it.

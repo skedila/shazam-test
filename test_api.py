@@ -5,14 +5,17 @@ and a first look at what the chart, search, and details endpoints return.
 Usage:
     python test_api.py                 # uses the US chart and a default search
     python test_api.py "bad bunny"     # custom search term
+    python test_api.py --mb-only       # only test MusicBrainz (no RapidAPI quota used)
 
 Every full response is saved to data/raw/ so you can open it and explore.
-This script makes 4 API requests per run.
+This script makes up to 4 RapidAPI requests per run, plus a few free
+MusicBrainz requests.
 """
 
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +30,11 @@ RAW_DIR = Path("data/raw")
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 HEADERS = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": API_HOST}
+
+MB_URL = "https://musicbrainz.org/ws/2"
+MB_CONTACT = os.getenv("MUSICBRAINZ_CONTACT", "yourteam@example.com")
+MB_HEADERS = {"User-Agent": f"ShazamChartPipeline/0.1 ({MB_CONTACT})"}
+FALLBACK_ARTISTS = ["Bad Bunny", "Taylor Swift", "BTS"]
 
 
 def call(name, path, params=None):
@@ -49,6 +57,13 @@ def call(name, path, params=None):
         return None
     if r.status_code == 429:
         print("  Rate limit or monthly quota reached.")
+        return None
+    if r.status_code == 204:
+        print("  Endpoint returned no data. It may be deprecated; check the Endpoints tab.")
+        return None
+    if 300 <= r.status_code < 400:
+        print(f"  Redirected (Location: {r.headers.get('Location')}). "
+              "The endpoint may be retired.")
         return None
 
     try:
@@ -82,11 +97,69 @@ def find_strings(obj, prefix):
     return found
 
 
+def save_json(name, data):
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = RAW_DIR / f"{name}_{stamp}.json"
+    out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+def test_musicbrainz(artists):
+    """Look up each artist on MusicBrainz and print country, type, and tags."""
+    print(f"\n=== MusicBrainz: looking up {len(artists)} artists")
+    if MB_CONTACT == "yourteam@example.com":
+        print("  Tip: set MUSICBRAINZ_CONTACT in .env to a real email.")
+    results = {}
+    for name in artists:
+        r = None
+        for attempt in range(3):  # retry if MusicBrainz is busy (503) or rate-limits us
+            try:
+                r = requests.get(
+                    f"{MB_URL}/artist",
+                    params={"query": f'artist:"{name}"', "fmt": "json", "limit": 1},
+                    headers=MB_HEADERS,
+                    timeout=30,
+                )
+            except requests.RequestException as e:
+                print(f"  {name}: request failed ({e})")
+                r = None
+            time.sleep(1.1)  # MusicBrainz allows about 1 request per second
+            if r is not None and r.status_code not in (429, 503):
+                break
+            wait = 2 ** (attempt + 1)
+            print(f"  {name}: busy or rate-limited, retrying in {wait}s...")
+            time.sleep(wait)
+
+        if r is None or r.status_code != 200:
+            status = r.status_code if r is not None else "no response"
+            print(f"  {name}: failed (status {status})")
+            results[name] = {"error": status}
+            continue
+        found = r.json().get("artists", [])
+        results[name] = found
+        if not found:
+            print(f"  {name}: no match")
+            continue
+        a = found[0]
+        tags = [t["name"] for t in sorted(a.get("tags", []),
+                                          key=lambda t: -t.get("count", 0))][:5]
+        print(f"  {name} -> {a.get('name')} | score {a.get('score')} | "
+              f"country {a.get('country')} | area {a.get('area', {}).get('name')} | "
+              f"type {a.get('type')} | tags {tags}")
+    out = save_json("musicbrainz_artists", results)
+    print(f"  Saved full responses to {out}")
+
+
 def main():
+    args = [a for a in sys.argv[1:] if a != "--mb-only"]
+    if "--mb-only" in sys.argv:
+        test_musicbrainz(FALLBACK_ARTISTS)
+        return
+
     if not API_KEY or API_KEY == "your_key_here":
         sys.exit("No API key found. Copy .env.example to .env and add your key.")
 
-    search_term = sys.argv[1] if len(sys.argv) > 1 else "despacito"
+    search_term = args[0] if args else "despacito"
 
     # 1. List every available chart (call this rarely; save the IDs).
     charts = call("charts_list", "/charts/list")
@@ -123,6 +196,10 @@ def main():
             print(f"  Mentions lyrics anywhere: {has_lyrics}")
     else:
         print("\nSkipping details: no track ID found in chart or search results.")
+
+    # 5. Enrich artists with MusicBrainz (free, no key).
+    artists = [t.get("subtitle") for t in tracks[:3] if t.get("subtitle")]
+    test_musicbrainz(artists or FALLBACK_ARTISTS)
 
     print("\nDone. Open the files in data/raw/ to explore the full responses.")
 
